@@ -11,7 +11,9 @@ st.set_page_config(
 )
 
 st.title("CatRisk Chaos")
-st.subheader("Simulación de riesgos catastróficos con Monte Carlo, teoría del caos y reaseguro")
+st.subheader(
+    "Simulación de riesgos catastróficos con Monte Carlo, teoría del caos y reaseguro"
+)
 
 with st.sidebar:
     st.header("Configuración")
@@ -60,10 +62,15 @@ if archivo_portafolio is None:
 
 df_portafolio = pd.read_excel(archivo_portafolio)
 
-st.success(f"Portafolio cargado correctamente: {len(df_portafolio)} pólizas")
+st.success(
+    f"Portafolio cargado correctamente: {len(df_portafolio)} pólizas"
+)
 
 with st.expander("Vista previa del portafolio"):
-    st.dataframe(df_portafolio.head(20), use_container_width=True)
+    st.dataframe(
+        df_portafolio.head(20),
+        use_container_width=True
+    )
 
 if ejecutar:
     with st.spinner("Ejecutando simulación Monte Carlo..."):
@@ -83,23 +90,79 @@ if ejecutar:
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("AAL retenido", f"${resultados['AAL']:,.0f}")
-    c2.metric("VaR", f"${resultados['VaR']:,.0f}")
-    c3.metric("TVaR", f"${resultados['TVaR']:,.0f}")
-    c4.metric("Prima sugerida", f"${resultados['Prima']:,.0f}")
+    c1.metric(
+        "AAL retenido",
+        f"${resultados['AAL']:,.0f}"
+    )
+
+    c2.metric(
+        f"VaR {nivel_confianza:.0%}",
+        f"${resultados['VaR']:,.0f}"
+    )
+
+    c3.metric(
+        f"TVaR {nivel_confianza:.0%}",
+        f"${resultados['TVaR']:,.0f}"
+    )
+
+    c4.metric(
+        "Prima sugerida",
+        f"${resultados['Prima']:,.0f}"
+    )
 
     c5, c6, c7, c8 = st.columns(4)
 
-    c5.metric("Lyapunov", f"{resultados['Lyapunov']:.4f}")
-    c6.metric("Factor caótico", f"{resultados['Factor Caos']:.4f}")
-    c7.metric("Cobertura promedio", f"{resultados['Cobertura Promedio']:.2%}")
-    c8.metric("Cobertura peor caso", f"{resultados['Cobertura Peor Caso']:.2%}")
+    c5.metric(
+        "Lyapunov",
+        f"{resultados['Lyapunov']:.4f}"
+    )
+
+    c6.metric(
+        "Factor caótico",
+        f"{resultados['Factor Caos']:.4f}"
+    )
+
+    c7.metric(
+        "Cobertura promedio",
+        f"{resultados['Cobertura Promedio']:.2%}"
+    )
+
+    c8.metric(
+        "Cobertura peor caso",
+        f"{resultados['Cobertura Peor Caso']:.2%}"
+    )
 
     st.divider()
 
-    st.subheader("Distribución de pérdidas retenidas")
+    st.subheader("Reaseguro y prima")
+
+    r1, r2, r3, r4 = st.columns(4)
+
+    r1.metric(
+        "Prima actual estimada",
+        f"${resultados['Prima Actual']:,.0f}"
+    )
+
+    r2.metric(
+        "Prima reaseguro",
+        f"${resultados['Prima Reaseguro']:,.0f}"
+    )
+
+    r3.metric(
+        "Diferencia de prima",
+        f"${resultados['Diferencia Prima']:,.0f}"
+    )
+
+    r4.metric(
+        "¿Recalcular prima?",
+        resultados["Recalcular Prima"]
+    )
+
+    st.divider()
 
     df_sim = resultados["df_simulaciones"]
+
+    st.subheader("Distribución de pérdidas retenidas")
 
     fig = px.histogram(
         df_sim,
@@ -108,7 +171,24 @@ if ejecutar:
         title="Distribución de pérdidas retenidas por la aseguradora"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    st.subheader("Pérdidas brutas vs retenidas")
+
+    fig2 = px.scatter(
+        df_sim,
+        x="perdida_bruta",
+        y="perdida_retenida_aseguradora",
+        title="Relación entre pérdida bruta y pérdida retenida"
+    )
+
+    st.plotly_chart(
+        fig2,
+        use_container_width=True
+    )
 
     st.subheader("Trayectoria caótica")
 
@@ -119,7 +199,17 @@ if ejecutar:
         title="Mapa logístico: trayectoria caótica"
     )
 
-    st.plotly_chart(fig_caos, use_container_width=True)
+    st.plotly_chart(
+        fig_caos,
+        use_container_width=True
+    )
+
+    st.subheader("Capas de reaseguro XoL")
+
+    st.dataframe(
+        resultados["df_capas"],
+        use_container_width=True
+    )
 
     st.subheader("Clasificación de riesgo")
 
@@ -134,5 +224,15 @@ if ejecutar:
         resultados["df_metricas"],
         use_container_width=True
     )
+
+    st.download_button(
+        label="Descargar reporte Excel",
+        data=resultados["excel_bytes"],
+        file_name=f"reporte_{tipo_riesgo}_{escenario}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 else:
-    st.warning("Configura los parámetros y presiona 'Ejecutar simulación'.")
+    st.warning(
+        "Configura los parámetros y presiona 'Ejecutar simulación'."
+    )
