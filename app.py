@@ -5,12 +5,12 @@ import plotly.express as px
 from simulador import ejecutar_simulacion
 
 st.set_page_config(
-    page_title="CatRisk Chaos",
+    page_title="ChaosRisk",
     page_icon="🌪️",
     layout="wide"
 )
 
-st.title("CatRisk Chaos")
+st.title("ChaosRisk")
 st.subheader(
     "Simulación de riesgos catastróficos con Monte Carlo, teoría del caos y reaseguro"
 )
