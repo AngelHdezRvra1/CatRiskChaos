@@ -1,8 +1,13 @@
+
 import numpy as np
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
 
+
+# =========================================================
+# VALIDACIÓN Y NORMALIZACIÓN DE PORTAFOLIO
+# =========================================================
 
 COLUMNAS_NECESARIAS = [
     "tipo_riesgo",
@@ -847,6 +852,16 @@ def ejecutar_simulacion(
         nombre = capa["nombre"]
         df_simulaciones[f"cedido_{nombre}"] = cedido_por_capa[nombre]
 
+    df_simulaciones["sin_perdida_retenida"] = (
+        df_simulaciones["perdida_retenida_aseguradora"] == 0
+    )
+
+    df_simulaciones["cerca_retencion_100m"] = np.isclose(
+        df_simulaciones["perdida_retenida_aseguradora"],
+        100_000_000,
+        atol=1
+    )
+
     df_metricas = pd.DataFrame({
         "metrica": [
             "Tipo de riesgo",
@@ -939,6 +954,38 @@ def ejecutar_simulacion(
         "x_t": trayectoria_caos
     })
 
+    total_sim = len(df_simulaciones)
+    escenarios_cero = int((df_simulaciones["perdida_retenida_aseguradora"] == 0).sum())
+    escenarios_retencion_100m = int(df_simulaciones["cerca_retencion_100m"].sum())
+    escenarios_positivos = int((df_simulaciones["perdida_retenida_aseguradora"] > 0).sum())
+
+    df_diagnostico_histograma = pd.DataFrame({
+        "indicador": [
+            "Simulaciones totales",
+            "Escenarios con pérdida retenida igual a 0",
+            "Escenarios con pérdida retenida positiva",
+            "Escenarios cerca de retención 100M",
+            "Porcentaje en cero",
+            "Porcentaje cerca de retención 100M",
+            "Pérdida retenida promedio",
+            "Pérdida retenida máxima",
+            "Pérdida bruta promedio",
+            "Pérdida bruta máxima"
+        ],
+        "valor": [
+            total_sim,
+            escenarios_cero,
+            escenarios_positivos,
+            escenarios_retencion_100m,
+            escenarios_cero / total_sim if total_sim > 0 else 0,
+            escenarios_retencion_100m / total_sim if total_sim > 0 else 0,
+            df_simulaciones["perdida_retenida_aseguradora"].mean(),
+            df_simulaciones["perdida_retenida_aseguradora"].max(),
+            df_simulaciones["perdida_bruta"].mean(),
+            df_simulaciones["perdida_bruta"].max()
+        ]
+    })
+
     output = BytesIO()
 
     with pd.ExcelWriter(
@@ -981,6 +1028,12 @@ def ejecutar_simulacion(
             index=False
         )
 
+        df_diagnostico_histograma.to_excel(
+            writer,
+            sheet_name="Diagnostico_Histograma",
+            index=False
+        )
+
         df_eventos.to_excel(
             writer,
             sheet_name="Eventos_Historicos",
@@ -1016,5 +1069,6 @@ def ejecutar_simulacion(
         "df_trayectoria_caos": df_trayectoria_caos,
         "df_historial_calibracion": df_historial_calibracion,
         "df_capas": df_capas,
+        "df_diagnostico_histograma": df_diagnostico_histograma,
         "excel_bytes": output
     }
