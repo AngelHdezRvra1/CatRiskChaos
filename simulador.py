@@ -1,13 +1,8 @@
-
 import numpy as np
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
 
-
-# =========================================================
-# VALIDACIÓN Y NORMALIZACIÓN DE PORTAFOLIO
-# =========================================================
 
 COLUMNAS_NECESARIAS = [
     "tipo_riesgo",
