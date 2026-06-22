@@ -1,6 +1,171 @@
+
 import numpy as np
 import pandas as pd
 from io import BytesIO
+from datetime import datetime
+
+
+# =========================================================
+# VALIDACIÓN Y NORMALIZACIÓN DE PORTAFOLIO
+# =========================================================
+
+COLUMNAS_NECESARIAS = [
+    "tipo_riesgo",
+    "tipo_construccion",
+    "anio_construccion",
+    "ocupacion",
+    "valor_expuesto",
+    "deducible",
+    "limite_cobertura",
+]
+
+MAPEO_TIPO_RIESGO = {
+    "terremoto": "Terremoto",
+    "earthquake": "Terremoto",
+    "inundacion": "Inundacion",
+    "inundación": "Inundacion",
+    "flood": "Inundacion",
+    "tormenta": "Tormenta",
+    "storm": "Tormenta",
+}
+
+MAPEO_CONSTRUCCION = {
+    "concreto": "Concreto",
+    "acero": "Acero",
+    "mamposteria": "Mamposteria",
+    "mampostería": "Mamposteria",
+    "mixta": "Mixta",
+}
+
+MAPEO_OCUPACION = {
+    "residencial": "Residencial",
+    "comercial": "Comercial",
+    "industrial": "Industrial",
+}
+
+
+def _normalizar_texto(valor):
+    if pd.isna(valor):
+        return ""
+    return str(valor).strip().lower()
+
+
+def validar_portafolio(df_portafolio):
+    """
+    Valida y normaliza el portafolio antes de ejecutar el simulador.
+
+    Retorna:
+    {
+        "ok": bool,
+        "errores": list[str],
+        "advertencias": list[str],
+        "df_limpio": DataFrame
+    }
+    """
+    errores = []
+    advertencias = []
+
+    if df_portafolio is None or df_portafolio.empty:
+        return {
+            "ok": False,
+            "errores": ["El archivo está vacío o no pudo leerse."],
+            "advertencias": [],
+            "df_limpio": pd.DataFrame(),
+        }
+
+    df = df_portafolio.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    faltantes = [col for col in COLUMNAS_NECESARIAS if col not in df.columns]
+    if faltantes:
+        errores.append(f"Faltan columnas requeridas: {faltantes}.")
+        return {
+            "ok": False,
+            "errores": errores,
+            "advertencias": advertencias,
+            "df_limpio": df,
+        }
+
+    # Normalización de categorías
+    df["tipo_riesgo"] = df["tipo_riesgo"].apply(
+        lambda x: MAPEO_TIPO_RIESGO.get(_normalizar_texto(x), str(x).strip())
+    )
+    df["tipo_construccion"] = df["tipo_construccion"].apply(
+        lambda x: MAPEO_CONSTRUCCION.get(_normalizar_texto(x), str(x).strip())
+    )
+    df["ocupacion"] = df["ocupacion"].apply(
+        lambda x: MAPEO_OCUPACION.get(_normalizar_texto(x), str(x).strip())
+    )
+
+    riesgos_validos = set(MAPEO_TIPO_RIESGO.values())
+    construcciones_validas = set(MAPEO_CONSTRUCCION.values())
+    ocupaciones_validas = set(MAPEO_OCUPACION.values())
+
+    riesgos_invalidos = sorted(set(df["tipo_riesgo"].dropna()) - riesgos_validos)
+    construcciones_invalidas = sorted(set(df["tipo_construccion"].dropna()) - construcciones_validas)
+    ocupaciones_invalidas = sorted(set(df["ocupacion"].dropna()) - ocupaciones_validas)
+
+    if riesgos_invalidos:
+        errores.append(f"Valores no válidos en tipo_riesgo: {riesgos_invalidos}. Usa Terremoto, Inundacion o Tormenta.")
+
+    if construcciones_invalidas:
+        errores.append(f"Valores no válidos en tipo_construccion: {construcciones_invalidas}. Usa Concreto, Acero, Mamposteria o Mixta.")
+
+    if ocupaciones_invalidas:
+        errores.append(f"Valores no válidos en ocupacion: {ocupaciones_invalidas}. Usa Residencial, Comercial o Industrial.")
+
+    # Conversión numérica
+    columnas_numericas = [
+        "anio_construccion",
+        "valor_expuesto",
+        "deducible",
+        "limite_cobertura",
+    ]
+
+    for col in columnas_numericas:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    nulos = df[COLUMNAS_NECESARIAS].isna().sum()
+    nulos = nulos[nulos > 0]
+    if len(nulos) > 0:
+        errores.append(f"Hay valores vacíos o no numéricos en columnas requeridas: {nulos.to_dict()}.")
+
+    anio_actual = datetime.now().year
+
+    if (df["anio_construccion"] < 1900).any() or (df["anio_construccion"] > anio_actual).any():
+        errores.append(f"anio_construccion debe estar entre 1900 y {anio_actual}.")
+
+    if (df["valor_expuesto"] <= 0).any():
+        errores.append("valor_expuesto debe ser mayor que 0 en todas las pólizas.")
+
+    if (df["deducible"] < 0).any():
+        errores.append("deducible debe ser mayor o igual que 0 en todas las pólizas.")
+
+    if (df["limite_cobertura"] <= 0).any():
+        errores.append("limite_cobertura debe ser mayor que 0 en todas las pólizas.")
+
+    if (df["deducible"] > df["limite_cobertura"]).any():
+        advertencias.append("Hay pólizas donde el deducible es mayor que el límite de cobertura. Revisa si esto es intencional.")
+
+    if (df["limite_cobertura"] > df["valor_expuesto"]).any():
+        advertencias.append("Hay pólizas donde el límite de cobertura es mayor que el valor expuesto. El simulador puede continuar, pero conviene revisarlo.")
+
+    if len(df) < 10:
+        advertencias.append("El portafolio tiene menos de 10 pólizas. Los resultados pueden no ser representativos.")
+
+    ok = len(errores) == 0
+
+    return {
+        "ok": ok,
+        "errores": errores,
+        "advertencias": advertencias,
+        "df_limpio": df,
+    }
+
+
+# =========================================================
+# SIMULADOR PRINCIPAL
+# =========================================================
 
 def ejecutar_simulacion(
     df_portafolio,
@@ -9,9 +174,21 @@ def ejecutar_simulacion(
     periodo_anios,
     n_simulaciones,
     nivel_confianza,
-    archivo_historico="data/Mexico_Datos.xlsx"
+    archivo_historico="data/Mexico_Datos.xlsx",
+    seed=42
 ):
-    np.random.seed(42)
+    validacion = validar_portafolio(df_portafolio)
+
+    if not validacion["ok"]:
+        raise ValueError("Portafolio inválido: " + " | ".join(validacion["errores"]))
+
+    df_portafolio = validacion["df_limpio"].copy()
+
+    # Normalizar entradas de usuario
+    tipo_riesgo = MAPEO_TIPO_RIESGO.get(_normalizar_texto(tipo_riesgo), tipo_riesgo)
+    escenario = str(escenario).strip()
+
+    rng = np.random.default_rng(seed)
 
     usar_frecuencia_historica = True
     usar_severidad_historica = True
@@ -53,28 +230,18 @@ def ejecutar_simulacion(
         "Moderado": 0.50,
         "Severo": 0.75,
         "Extremo": 0.90,
-        "Catastrofico": 0.95
+        "Catastrofico": 0.95,
+        "Catastrófico": 0.95,
     }
 
-    columnas_necesarias = [
-        "tipo_riesgo",
-        "tipo_construccion",
-        "anio_construccion",
-        "ocupacion",
-        "valor_expuesto",
-        "deducible",
-        "limite_cobertura"
-    ]
+    if tipo_riesgo not in mapeo_eventos:
+        raise ValueError("Tipo de riesgo no reconocido. Usa Terremoto, Inundacion o Tormenta.")
 
-    faltantes = [
-        col for col in columnas_necesarias
-        if col not in df_portafolio.columns
-    ]
+    if escenario not in percentiles_escenario:
+        raise ValueError("Escenario no reconocido. Usa Moderado, Severo, Extremo o Catastrofico.")
 
-    if faltantes:
-        raise ValueError(
-            f"El portafolio no tiene estas columnas requeridas: {faltantes}"
-        )
+    if periodo_anios < 1:
+        raise ValueError("El periodo de aseguramiento debe ser mayor o igual que 1.")
 
     df_hist = pd.read_excel(
         archivo_historico,
@@ -87,10 +254,13 @@ def ejecutar_simulacion(
 
     if df_riesgo.empty:
         raise ValueError(
-            "No hay pólizas para ese tipo de riesgo en el portafolio."
+            f"No hay pólizas para el tipo de riesgo seleccionado: {tipo_riesgo}."
         )
 
     tipo_emdat = mapeo_eventos[tipo_riesgo]
+
+    if "Disaster Type" not in df_hist.columns:
+        raise ValueError("El archivo histórico no contiene la columna 'Disaster Type'.")
 
     df_eventos = df_hist[
         df_hist["Disaster Type"] == tipo_emdat
@@ -98,8 +268,11 @@ def ejecutar_simulacion(
 
     if df_eventos.empty:
         raise ValueError(
-            "No hay eventos históricos para ese riesgo."
+            f"No hay eventos históricos para el riesgo {tipo_riesgo} ({tipo_emdat})."
         )
+
+    if "Start Year" not in df_eventos.columns:
+        raise ValueError("El archivo histórico no contiene la columna 'Start Year'.")
 
     anio_min = int(df_eventos["Start Year"].min())
     anio_max = int(df_eventos["Start Year"].max())
@@ -115,6 +288,7 @@ def ejecutar_simulacion(
         else lambda_manual
     )
 
+    # Esta línea garantiza que el periodo de aseguramiento afecte la frecuencia.
     lambda_periodo = lambda_anual * periodo_anios
 
     def obtener_variable_severidad(df_eventos):
@@ -136,7 +310,7 @@ def ejecutar_simulacion(
                     return col, serie
 
         raise ValueError(
-            "No hay suficientes datos históricos de severidad."
+            "No hay suficientes datos históricos de severidad para este riesgo."
         )
 
     col_severidad, severidad_historica = obtener_variable_severidad(
@@ -149,10 +323,13 @@ def ejecutar_simulacion(
     severidad_min = severidad_historica.min()
     severidad_max = severidad_historica.max()
 
-    factor_severidad_historico = (
-        (severidad_base - severidad_min)
-        / (severidad_max - severidad_min)
-    )
+    if severidad_max == severidad_min:
+        factor_severidad_historico = 0.20
+    else:
+        factor_severidad_historico = (
+            (severidad_base - severidad_min)
+            / (severidad_max - severidad_min)
+        )
 
     factor_severidad_historico = np.clip(
         factor_severidad_historico,
@@ -164,7 +341,8 @@ def ejecutar_simulacion(
         "Moderado": 0.20,
         "Severo": 0.35,
         "Extremo": 0.55,
-        "Catastrofico": 0.80
+        "Catastrofico": 0.80,
+        "Catastrófico": 0.80,
     }
 
     severidad_central = (
@@ -174,11 +352,12 @@ def ejecutar_simulacion(
     )
 
     def generar_trayectoria_caotica(r, x0, n):
-        x = x0
+        x = float(x0)
         trayectoria = []
 
         for _ in range(n):
             x = r * x * (1 - x)
+            x = np.clip(x, 1e-10, 1 - 1e-10)
             trayectoria.append(x)
 
         return np.array(trayectoria)
@@ -189,12 +368,12 @@ def ejecutar_simulacion(
         )
 
         derivadas = np.where(
-            derivadas == 0,
-            1e-10,
+            derivadas <= 1e-12,
+            1e-12,
             derivadas
         )
 
-        return np.mean(np.log(derivadas))
+        return float(np.mean(np.log(derivadas)))
 
     def obtener_factor_caos(r, x0):
         trayectoria = generar_trayectoria_caotica(
@@ -323,12 +502,11 @@ def ejecutar_simulacion(
         polizas_dict = df_riesgo.to_dict(orient="records")
 
         for i in range(n_simulaciones):
-            numero_eventos = np.random.poisson(
-                lambda_periodo
-            )
+            # La frecuencia ya incluye el periodo de aseguramiento.
+            numero_eventos = rng.poisson(lambda_periodo)
 
-            perdida_bruta_anual = 0
-            perdida_neta_anual = 0
+            perdida_bruta_periodo = 0
+            perdida_neta_periodo = 0
 
             idx_caos = i % len(trayectoria_caos)
 
@@ -339,8 +517,8 @@ def ejecutar_simulacion(
             )
 
             for _ in range(numero_eventos):
-                severidad_evento = np.random.lognormal(
-                    mean=np.log(severidad_central),
+                severidad_evento = rng.lognormal(
+                    mean=np.log(max(severidad_central, 1e-6)),
                     sigma=0.35
                 )
 
@@ -358,15 +536,15 @@ def ejecutar_simulacion(
                         severidad_evento
                     )
 
-                    perdida_bruta_anual += perdida_bruta
-                    perdida_neta_anual += perdida_neta
+                    perdida_bruta_periodo += perdida_bruta
+                    perdida_neta_periodo += perdida_neta
 
             perdida_retenida, perdida_cedida, detalle_capas = aplicar_reaseguro_xol_multicapa(
-                perdida_neta_anual
+                perdida_neta_periodo
             )
 
-            perdidas_brutas.append(perdida_bruta_anual)
-            perdidas_netas_antes_reaseguro.append(perdida_neta_anual)
+            perdidas_brutas.append(perdida_bruta_periodo)
+            perdidas_netas_antes_reaseguro.append(perdida_neta_periodo)
             perdidas_retenidas.append(perdida_retenida)
             perdidas_cedidas.append(perdida_cedida)
 
@@ -393,9 +571,13 @@ def ejecutar_simulacion(
         perdidas_retenidas,
         perdidas_cedidas
     ):
-        AAL_antes = np.mean(perdidas_netas_antes_reaseguro)
-        AAL_retenido = np.mean(perdidas_retenidas)
-        AAL_cedido = np.mean(perdidas_cedidas)
+        perdida_esperada_antes_periodo = np.mean(perdidas_netas_antes_reaseguro)
+        perdida_esperada_retenida_periodo = np.mean(perdidas_retenidas)
+        perdida_esperada_cedida_periodo = np.mean(perdidas_cedidas)
+
+        aal_antes_anual = perdida_esperada_antes_periodo / periodo_anios
+        aal_retenido_anual = perdida_esperada_retenida_periodo / periodo_anios
+        aal_cedido_anual = perdida_esperada_cedida_periodo / periodo_anios
 
         VaR_antes = np.quantile(
             perdidas_netas_antes_reaseguro,
@@ -436,7 +618,7 @@ def ejecutar_simulacion(
         )
 
         cobertura_promedio = (
-            1 - AAL_retenido / perdida_bruta_promedio
+            1 - perdida_esperada_retenida_periodo / perdida_bruta_promedio
             if perdida_bruta_promedio > 0
             else 0
         )
@@ -450,8 +632,8 @@ def ejecutar_simulacion(
         )
 
         reduccion_AAL = (
-            1 - AAL_retenido / AAL_antes
-            if AAL_antes > 0
+            1 - perdida_esperada_retenida_periodo / perdida_esperada_antes_periodo
+            if perdida_esperada_antes_periodo > 0
             else 0
         )
 
@@ -462,9 +644,12 @@ def ejecutar_simulacion(
         )
 
         return {
-            "AAL Antes Reaseguro": AAL_antes,
-            "AAL Retenido": AAL_retenido,
-            "AAL Cedido": AAL_cedido,
+            "Perdida Esperada Antes Reaseguro Periodo": perdida_esperada_antes_periodo,
+            "Perdida Esperada Retenida Periodo": perdida_esperada_retenida_periodo,
+            "Perdida Esperada Cedida Periodo": perdida_esperada_cedida_periodo,
+            "AAL Antes Reaseguro Anual": aal_antes_anual,
+            "AAL Retenido Anual": aal_retenido_anual,
+            "AAL Cedido Anual": aal_cedido_anual,
             "VaR Antes Reaseguro": VaR_antes,
             "TVaR Antes Reaseguro": TVaR_antes,
             "VaR Retenido": VaR_retenido,
@@ -507,20 +692,6 @@ def ejecutar_simulacion(
             perdidas_cedidas
         )
 
-        historial_calibracion.append({
-            "iteracion": iteracion,
-            "r_caos": r_actual,
-            "x0": x0_actual,
-            "lyapunov": lyapunov,
-            "factor_caos": factor_caos,
-            "AAL_antes_reaseguro": metricas["AAL Antes Reaseguro"],
-            "AAL_retenido": metricas["AAL Retenido"],
-            "VaR_retenido": metricas["VaR Retenido"],
-            "TVaR_retenido": metricas["TVaR Retenido"],
-            "Cobertura_peor_caso": metricas["Cobertura Peor Caso"],
-            "Reduccion_TVaR_reaseguro": metricas["Reduccion TVaR Reaseguro"]
-        })
-
         condicion_estable = (
             lyapunov <= limite_lyapunov
         )
@@ -530,38 +701,58 @@ def ejecutar_simulacion(
             >= limite_cobertura_peor
         )
 
+        historial_calibracion.append({
+            "iteracion": iteracion,
+            "r_caos": r_actual,
+            "x0": x0_actual,
+            "lyapunov": lyapunov,
+            "limite_lyapunov": limite_lyapunov,
+            "modelo_estable": condicion_estable,
+            "factor_caos": factor_caos,
+            "perdida_esperada_retenida_periodo": metricas["Perdida Esperada Retenida Periodo"],
+            "AAL_retenido_anual": metricas["AAL Retenido Anual"],
+            "VaR_retenido": metricas["VaR Retenido"],
+            "TVaR_retenido": metricas["TVaR Retenido"],
+            "Cobertura_peor_caso": metricas["Cobertura Peor Caso"],
+            "Reduccion_TVaR_reaseguro": metricas["Reduccion TVaR Reaseguro"]
+        })
+
         if not activar_loop_calibracion:
             break
 
         if condicion_estable and condicion_cobertura:
             break
 
+        # Ajuste no lineal:
+        # Si Lyapunov es demasiado alto, se reduce r para disminuir sensibilidad a condiciones iniciales.
         if lyapunov > limite_lyapunov:
             r_actual -= 0.05
 
+        # Si la cobertura del peor caso es baja, se modifica x0 para suavizar el factor dinámico.
         if metricas["Cobertura Peor Caso"] < limite_cobertura_peor:
             x0_actual = max(
                 0.10,
                 x0_actual - 0.03
             )
 
-        r_actual = np.clip(
+        r_actual = float(np.clip(
             r_actual,
             3.30,
             3.95
-        )
+        ))
 
-        x0_actual = np.clip(
+        x0_actual = float(np.clip(
             x0_actual,
             0.10,
             0.90
-        )
+        ))
 
     df_historial_calibracion = pd.DataFrame(
         historial_calibracion
     )
 
-    AAL = metricas["AAL Retenido"]
+    perdida_esperada_periodo = metricas["Perdida Esperada Retenida Periodo"]
+    aal_anual = metricas["AAL Retenido Anual"]
     VaR = metricas["VaR Retenido"]
     TVaR = metricas["TVaR Retenido"]
     PML = metricas["PML Retenido"]
@@ -578,15 +769,15 @@ def ejecutar_simulacion(
         else 0
     )
 
-    prima_pura = AAL
+    prima_pura_periodo = perdida_esperada_periodo
 
-    prima_tecnica = (
-        AAL
-        + factor_seguridad * (TVaR - AAL)
+    prima_tecnica_periodo = (
+        perdida_esperada_periodo
+        + factor_seguridad * (TVaR - perdida_esperada_periodo)
     )
 
-    prima_sugerida = (
-        prima_tecnica
+    prima_sugerida_periodo = (
+        prima_tecnica_periodo
         + prima_reaseguro
     )
 
@@ -599,14 +790,15 @@ def ejecutar_simulacion(
     prima_actual_estimativa = (
         df_riesgo[col_suma].sum()
         * 0.015
+        * periodo_anios
     )
 
-    prima_minima_comercial = AAL * 1.05
-    prima_maxima_comercial = AAL * 2.00 + prima_reaseguro
+    prima_minima_comercial = perdida_esperada_periodo * 1.05
+    prima_maxima_comercial = perdida_esperada_periodo * 2.00 + prima_reaseguro
 
     prima_sugerida_comercial = min(
         max(
-            prima_sugerida,
+            prima_sugerida_periodo,
             prima_minima_comercial
         ),
         prima_maxima_comercial
@@ -664,8 +856,9 @@ def ejecutar_simulacion(
         "metrica": [
             "Tipo de riesgo",
             "Escenario",
-            "Periodo",
+            "Periodo de aseguramiento",
             "Simulaciones",
+            "Nivel de confianza",
             "Años observados",
             "Eventos observados",
             "Lambda histórica anual",
@@ -675,22 +868,27 @@ def ejecutar_simulacion(
             "r final",
             "x0 final",
             "Exponente Lyapunov",
+            "Límite Lyapunov",
+            "Modelo caótico estable",
             "Factor caótico",
             "Usar reaseguro XoL",
             "Prima reaseguro",
-            "AAL antes reaseguro",
-            "AAL retenido",
-            "AAL cedido",
+            "Pérdida esperada antes reaseguro periodo",
+            "Pérdida esperada retenida periodo",
+            "Pérdida esperada cedida periodo",
+            "AAL antes reaseguro anualizado",
+            "AAL retenido anualizado",
+            "AAL cedido anualizado",
             f"VaR retenido {nivel_confianza:.0%}",
             f"TVaR retenido {nivel_confianza:.0%}",
             "PML retenido",
             "Máxima pérdida retenida",
             "Reducción AAL reaseguro",
             "Reducción TVaR reaseguro",
-            "Prima actual estimada",
-            "Prima pura retenida",
-            "Prima técnica retenida",
-            "Prima sugerida comercial",
+            "Prima actual estimada periodo",
+            "Prima pura periodo",
+            "Prima técnica periodo",
+            "Prima sugerida comercial periodo",
             "Diferencia de prima",
             "Recalcular prima",
             "Cobertura promedio",
@@ -701,6 +899,7 @@ def ejecutar_simulacion(
             escenario,
             periodo_anios,
             n_simulaciones,
+            nivel_confianza,
             f"{anio_min}-{anio_max}",
             eventos_observados,
             lambda_historica,
@@ -710,12 +909,17 @@ def ejecutar_simulacion(
             r_actual,
             x0_actual,
             lyapunov,
+            limite_lyapunov,
+            lyapunov <= limite_lyapunov,
             factor_caos,
             usar_reaseguro_xol,
             prima_reaseguro,
-            metricas["AAL Antes Reaseguro"],
-            metricas["AAL Retenido"],
-            metricas["AAL Cedido"],
+            metricas["Perdida Esperada Antes Reaseguro Periodo"],
+            metricas["Perdida Esperada Retenida Periodo"],
+            metricas["Perdida Esperada Cedida Periodo"],
+            metricas["AAL Antes Reaseguro Anual"],
+            metricas["AAL Retenido Anual"],
+            metricas["AAL Cedido Anual"],
             VaR,
             TVaR,
             PML,
@@ -723,8 +927,8 @@ def ejecutar_simulacion(
             metricas["Reduccion AAL Reaseguro"],
             metricas["Reduccion TVaR Reaseguro"],
             prima_actual_estimativa,
-            prima_pura,
-            prima_tecnica,
+            prima_pura_periodo,
+            prima_tecnica_periodo,
             prima_sugerida_comercial,
             diferencia_prima,
             recalcular_prima,
@@ -791,7 +995,9 @@ def ejecutar_simulacion(
     output.seek(0)
 
     return {
-        "AAL": AAL,
+        "Perdida Esperada Periodo": perdida_esperada_periodo,
+        "AAL": perdida_esperada_periodo,
+        "AAL Anual": aal_anual,
         "VaR": VaR,
         "TVaR": TVaR,
         "PML": PML,
@@ -805,8 +1011,8 @@ def ejecutar_simulacion(
         "Factor Caos": factor_caos,
         "Cobertura Promedio": metricas["Cobertura Promedio"],
         "Cobertura Peor Caso": metricas["Cobertura Peor Caso"],
-        "AAL Antes Reaseguro": metricas["AAL Antes Reaseguro"],
-        "AAL Cedido": metricas["AAL Cedido"],
+        "AAL Antes Reaseguro": metricas["Perdida Esperada Antes Reaseguro Periodo"],
+        "AAL Cedido": metricas["Perdida Esperada Cedida Periodo"],
         "Reduccion AAL Reaseguro": metricas["Reduccion AAL Reaseguro"],
         "Reduccion TVaR Reaseguro": metricas["Reduccion TVaR Reaseguro"],
         "df_simulaciones": df_simulaciones,
