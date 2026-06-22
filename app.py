@@ -1,6 +1,7 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 from io import BytesIO
 from datetime import datetime
@@ -121,14 +122,88 @@ def explicar_bloque(titulo, texto):
         st.write(texto)
 
 
+def mostrar_diagnostico_histograma(df_sim):
+    """
+    Muestra diagnósticos para interpretar si el histograma tiene picos por:
+    1) simulaciones sin evento,
+    2) retención del reaseguro XoL,
+    3) cola extrema.
+    """
+    total = len(df_sim)
+    if total == 0:
+        return
+
+    perdidas_ret = df_sim["perdida_retenida_aseguradora"]
+    perdidas_brutas = df_sim["perdida_bruta"]
+
+    escenarios_cero = int((perdidas_ret == 0).sum())
+    escenarios_retencion_100m = int(np.isclose(perdidas_ret, 100_000_000, atol=1).sum())
+    escenarios_con_perdida = int((perdidas_ret > 0).sum())
+
+    diagnostico = pd.DataFrame(
+        {
+            "Indicador": [
+                "Simulaciones totales",
+                "Escenarios con pérdida retenida igual a 0",
+                "Escenarios con pérdida retenida positiva",
+                "Escenarios retenidos cerca de 100 millones",
+                "Porcentaje en cero",
+                "Porcentaje cerca de 100 millones",
+                "Pérdida retenida mínima",
+                "Pérdida retenida promedio",
+                "Pérdida retenida máxima",
+                "Pérdida bruta promedio",
+                "Pérdida bruta máxima",
+            ],
+            "Valor": [
+                f"{total:,}",
+                f"{escenarios_cero:,}",
+                f"{escenarios_con_perdida:,}",
+                f"{escenarios_retencion_100m:,}",
+                f"{escenarios_cero / total:.2%}",
+                f"{escenarios_retencion_100m / total:.2%}",
+                f"${perdidas_ret.min():,.2f}",
+                f"${perdidas_ret.mean():,.2f}",
+                f"${perdidas_ret.max():,.2f}",
+                f"${perdidas_brutas.mean():,.2f}",
+                f"${perdidas_brutas.max():,.2f}",
+            ],
+        }
+    )
+
+    st.subheader("🔎 Diagnóstico del histograma")
+    st.dataframe(diagnostico, use_container_width=True)
+
+    if escenarios_cero / total > 0.30:
+        st.info(
+            "El pico cercano a cero tiene sentido: una parte importante de las simulaciones no tuvo eventos "
+            "o generó pérdidas retenidas nulas después de aplicar condiciones de póliza y reaseguro."
+        )
+
+    if escenarios_retencion_100m / total > 0.10:
+        st.warning(
+            "El pico cercano a 100 millones probablemente es causado por la retención de la primera capa XoL. "
+            "Cuando muchas pérdidas superan la retención, la pérdida retenida por la aseguradora se concentra alrededor de ese umbral."
+        )
+
+
 def crear_reporte_pdf(resultados, tipo_riesgo, escenario, periodo_anios, n_simulaciones, nivel_confianza):
     """
-    Genera un PDF simple con las métricas principales y tablas del reporte.
+    Genera un PDF completo y paginado.
+    Incluye:
+    - Resumen ejecutivo.
+    - Métricas.
+    - Capas de reaseguro.
+    - Historial completo de calibración caótica.
+    - Diagnóstico del histograma.
+    - Todas las pólizas del portafolio filtrado/clasificado.
+    - Una muestra amplia de simulaciones.
+
     Requiere reportlab en requirements.txt:
     reportlab
     """
     try:
-        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.pagesizes import legal, landscape
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.platypus import (
@@ -138,6 +213,7 @@ def crear_reporte_pdf(resultados, tipo_riesgo, escenario, periodo_anios, n_simul
             Table,
             TableStyle,
             PageBreak,
+            KeepTogether,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -145,13 +221,23 @@ def crear_reporte_pdf(resultados, tipo_riesgo, escenario, periodo_anios, n_simul
         ) from exc
 
     buffer = BytesIO()
+
+    # Legal horizontal da más espacio para tablas anchas.
+    page_size = landscape(legal)
+    page_width, page_height = page_size
+    left_margin = 22
+    right_margin = 22
+    top_margin = 25
+    bottom_margin = 25
+    usable_width = page_width - left_margin - right_margin
+
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=letter,
-        rightMargin=35,
-        leftMargin=35,
-        topMargin=35,
-        bottomMargin=35,
+        pagesize=page_size,
+        rightMargin=right_margin,
+        leftMargin=left_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
     )
 
     styles = getSampleStyleSheet()
@@ -161,73 +247,188 @@ def crear_reporte_pdf(resultados, tipo_riesgo, escenario, periodo_anios, n_simul
     body_style.spaceAfter = 8
 
     small_style = ParagraphStyle(
-        "small",
+        "small_table",
         parent=styles["BodyText"],
-        fontSize=8,
-        leading=10,
+        fontSize=5.6,
+        leading=6.2,
+        wordWrap="CJK",
     )
+
+    header_style = ParagraphStyle(
+        "header_table",
+        parent=styles["BodyText"],
+        fontSize=5.7,
+        leading=6.3,
+        alignment=1,
+        wordWrap="CJK",
+        fontName="Helvetica-Bold",
+    )
+
+    note_style = ParagraphStyle(
+        "note",
+        parent=styles["BodyText"],
+        fontSize=7,
+        leading=8,
+    )
+
+    def fmt_valor(x):
+        """Formato legible para celdas del PDF."""
+        try:
+            if pd.isna(x):
+                return ""
+        except Exception:
+            pass
+
+        if isinstance(x, (float, int, np.integer, np.floating)):
+            if abs(float(x)) >= 1000:
+                return f"{float(x):,.2f}"
+            return f"{float(x):.6g}"
+
+        texto = str(x)
+        # Evita celdas gigantes en PDF.
+        if len(texto) > 80:
+            texto = texto[:77] + "..."
+        return texto
+
+    def df_to_pdf_table(df, max_rows=None, font_size=5.6, header_font_size=5.7):
+        """
+        Convierte un DataFrame a tabla ReportLab que se ajusta al ancho disponible.
+        La tabla se pagina verticalmente con repeatRows=1.
+        """
+        df_local = df.copy()
+
+        if max_rows is not None:
+            df_local = df_local.head(max_rows)
+
+        # Convertir encabezados y celdas en Paragraph para permitir saltos de línea.
+        header = [
+            Paragraph(str(col).replace("_", " "), header_style)
+            for col in df_local.columns
+        ]
+
+        data = [header]
+
+        for _, row in df_local.iterrows():
+            data.append([
+                Paragraph(fmt_valor(value), small_style)
+                for value in row.tolist()
+            ])
+
+        ncols = max(len(df_local.columns), 1)
+
+        # Ancho mínimo razonable por columna.
+        col_width = usable_width / ncols
+        col_widths = [col_width] * ncols
+
+        table = Table(
+            data,
+            colWidths=col_widths,
+            repeatRows=1,
+            splitByRow=True
+        )
+
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                    ("FONTSIZE", (0, 0), (-1, -1), font_size),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+            )
+        )
+
+        return table
+
+    def agregar_tabla_df(story, titulo, df, descripcion=None, max_rows=None):
+        story.append(Paragraph(titulo, heading_style))
+
+        if descripcion:
+            story.append(Paragraph(descripcion, note_style))
+            story.append(Spacer(1, 5))
+
+        if df is None or df.empty:
+            story.append(Paragraph("No hay información disponible para esta sección.", body_style))
+            story.append(Spacer(1, 10))
+            return
+
+        story.append(df_to_pdf_table(df, max_rows=max_rows))
+        story.append(Spacer(1, 10))
 
     story = []
 
     story.append(Paragraph("Reporte de simulación - ChaosRisk", title_style))
     story.append(Paragraph(f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y %H:%M')}", body_style))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
-    parametros = [
-        ["Parámetro", "Valor"],
-        ["Tipo de riesgo", str(tipo_riesgo)],
-        ["Escenario", str(escenario)],
-        ["Periodo de aseguramiento", f"{periodo_anios} año(s)"],
-        ["Simulaciones Monte Carlo", f"{n_simulaciones:,}"],
-        ["Nivel de confianza", f"{nivel_confianza:.0%}"],
-    ]
-
-    tabla_parametros = Table(parametros, colWidths=[180, 300])
-    tabla_parametros.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]
-        )
+    parametros = pd.DataFrame(
+        {
+            "Parámetro": [
+                "Tipo de riesgo",
+                "Escenario",
+                "Periodo de aseguramiento",
+                "Simulaciones Monte Carlo",
+                "Nivel de confianza",
+            ],
+            "Valor": [
+                str(tipo_riesgo),
+                str(escenario),
+                f"{periodo_anios} año(s)",
+                f"{n_simulaciones:,}",
+                f"{nivel_confianza:.0%}",
+            ],
+        }
     )
 
-    story.append(Paragraph("Parámetros de simulación", heading_style))
-    story.append(tabla_parametros)
-    story.append(Spacer(1, 12))
-
-    resumen = [
-        ["Métrica", "Valor"],
-        ["Pérdida esperada retenida del periodo", f"${resultados['Perdida Esperada Periodo']:,.2f}"],
-        ["AAL retenido anualizado", f"${resultados['AAL Anual']:,.2f}"],
-        [f"VaR retenido {nivel_confianza:.0%}", f"${resultados['VaR']:,.2f}"],
-        [f"TVaR retenido {nivel_confianza:.0%}", f"${resultados['TVaR']:,.2f}"],
-        ["PML retenido", f"${resultados['PML']:,.2f}"],
-        ["Prima sugerida del periodo", f"${resultados['Prima']:,.2f}"],
-        ["Exponente de Lyapunov final", f"{resultados['Lyapunov']:.6f}"],
-        ["Factor caótico final", f"{resultados['Factor Caos']:.6f}"],
-        ["Cobertura promedio", f"{resultados['Cobertura Promedio']:.2%}"],
-        ["Cobertura peor caso", f"{resultados['Cobertura Peor Caso']:.2%}"],
-        ["Recalcular prima", str(resultados["Recalcular Prima"])],
-    ]
-
-    tabla_resumen = Table(resumen, colWidths=[250, 230])
-    tabla_resumen.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]
-        )
+    agregar_tabla_df(
+        story,
+        "Parámetros de simulación",
+        parametros,
+        "Configuración seleccionada por el usuario para generar los escenarios de pérdida."
     )
 
-    story.append(Paragraph("Resumen ejecutivo", heading_style))
-    story.append(tabla_resumen)
-    story.append(Spacer(1, 12))
+    resumen = pd.DataFrame(
+        {
+            "Métrica": [
+                "Pérdida esperada retenida del periodo",
+                "AAL retenido anualizado",
+                f"VaR retenido {nivel_confianza:.0%}",
+                f"TVaR retenido {nivel_confianza:.0%}",
+                "PML retenido",
+                "Prima sugerida del periodo",
+                "Exponente de Lyapunov final",
+                "Factor caótico final",
+                "Cobertura promedio",
+                "Cobertura peor caso",
+                "Recalcular prima",
+            ],
+            "Valor": [
+                f"${resultados['Perdida Esperada Periodo']:,.2f}",
+                f"${resultados['AAL Anual']:,.2f}",
+                f"${resultados['VaR']:,.2f}",
+                f"${resultados['TVaR']:,.2f}",
+                f"${resultados['PML']:,.2f}",
+                f"${resultados['Prima']:,.2f}",
+                f"{resultados['Lyapunov']:.6f}",
+                f"{resultados['Factor Caos']:.6f}",
+                f"{resultados['Cobertura Promedio']:.2%}",
+                f"{resultados['Cobertura Peor Caso']:.2%}",
+                str(resultados["Recalcular Prima"]),
+            ],
+        }
+    )
+
+    agregar_tabla_df(
+        story,
+        "Resumen ejecutivo",
+        resumen,
+        "Principales resultados agregados del portafolio después de aplicar simulación, componente caótico y reaseguro."
+    )
 
     story.append(Paragraph("Interpretación general", heading_style))
     story.append(
@@ -236,65 +437,90 @@ def crear_reporte_pdf(resultados, tipo_riesgo, escenario, periodo_anios, n_simul
             "La pérdida esperada retenida corresponde al promedio de pérdidas que permanecerían en la aseguradora "
             "después de aplicar deducibles, límites de cobertura y reaseguro. El VaR representa un percentil extremo "
             "de la distribución de pérdidas, mientras que el TVaR estima el promedio de las pérdidas que superan dicho umbral. "
-            "El exponente de Lyapunov se usa como indicador de sensibilidad del componente no lineal del modelo.",
-            body_style,
+            "El exponente de Lyapunov se utiliza como indicador de sensibilidad del componente no lineal del modelo.",
+            note_style,
         )
     )
 
     story.append(PageBreak())
 
-    story.append(Paragraph("Métricas completas del modelo", heading_style))
-    df_metricas = resultados["df_metricas"].copy()
-    df_metricas["valor"] = df_metricas["valor"].astype(str)
-    data_metricas = [["Métrica", "Valor"]] + df_metricas.values.tolist()
-    tabla_metricas = Table(data_metricas[:45], colWidths=[230, 250], repeatRows=1)
-    tabla_metricas.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 7),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]
-        )
+    agregar_tabla_df(
+        story,
+        "Métricas completas del modelo",
+        resultados["df_metricas"],
+        "Tabla completa de parámetros, calibración y métricas finales del modelo."
     )
-    story.append(tabla_metricas)
 
     story.append(PageBreak())
 
-    story.append(Paragraph("Capas de reaseguro XoL", heading_style))
-    df_capas = resultados["df_capas"].copy()
-    data_capas = [df_capas.columns.tolist()] + df_capas.astype(str).values.tolist()
-    tabla_capas = Table(data_capas, repeatRows=1)
-    tabla_capas.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ]
-        )
+    agregar_tabla_df(
+        story,
+        "Capas de reaseguro XoL",
+        resultados["df_capas"],
+        "Capas utilizadas para transferir pérdidas de la aseguradora hacia el reasegurador."
     )
-    story.append(tabla_capas)
-    story.append(Spacer(1, 12))
 
-    story.append(Paragraph("Historial de calibración caótica", heading_style))
-    df_cal = resultados["df_historial_calibracion"].copy()
-    data_cal = [df_cal.columns.tolist()] + df_cal.round(6).astype(str).values.tolist()
-    tabla_cal = Table(data_cal, repeatRows=1)
-    tabla_cal.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 6),
-            ]
-        )
+    story.append(PageBreak())
+
+    agregar_tabla_df(
+        story,
+        "Historial completo de calibración caótica",
+        resultados["df_historial_calibracion"],
+        "Esta tabla muestra todas las iteraciones de calibración. Si el exponente de Lyapunov supera el límite definido, el modelo reduce el parámetro r para disminuir la sensibilidad a condiciones iniciales."
     )
-    story.append(tabla_cal)
+
+    if "df_diagnostico_histograma" in resultados:
+        story.append(PageBreak())
+        agregar_tabla_df(
+            story,
+            "Diagnóstico del histograma",
+            resultados["df_diagnostico_histograma"],
+            "Ayuda a interpretar si los picos del histograma provienen de escenarios sin pérdida, de la retención XoL o de pérdidas extremas."
+        )
+
+    story.append(PageBreak())
+
+    df_clasificacion_pdf = resultados["df_clasificacion"].copy()
+
+    # Reordenar columnas para que primero salgan las variables más importantes.
+    columnas_preferidas = [
+        "tipo_riesgo",
+        "tipo_construccion",
+        "anio_construccion",
+        "ocupacion",
+        "valor_expuesto",
+        "deducible",
+        "limite_cobertura",
+        "factor_vulnerabilidad",
+        "exposicion_ajustada",
+        "clasificacion_riesgo",
+    ]
+
+    columnas_existentes = [c for c in columnas_preferidas if c in df_clasificacion_pdf.columns]
+    columnas_restantes = [c for c in df_clasificacion_pdf.columns if c not in columnas_existentes]
+    df_clasificacion_pdf = df_clasificacion_pdf[columnas_existentes + columnas_restantes]
+
+    agregar_tabla_df(
+        story,
+        f"Clasificación de riesgo por póliza ({len(df_clasificacion_pdf)} pólizas)",
+        df_clasificacion_pdf,
+        "Se muestran todas las pólizas disponibles para el tipo de riesgo seleccionado. Si el portafolio contiene 100 pólizas, se imprimen las 100; si contiene x pólizas, se imprimen x pólizas. La tabla se divide automáticamente en varias páginas cuando es necesario."
+    )
+
+    story.append(PageBreak())
+
+    df_sim_pdf = resultados["df_simulaciones"].copy()
+
+    # Las simulaciones pueden ser 10,000 o 50,000; incluir todas haría un PDF enorme.
+    # Se incluye una muestra amplia y el Excel queda como respaldo completo.
+    max_sim_pdf = min(len(df_sim_pdf), 300)
+
+    agregar_tabla_df(
+        story,
+        f"Muestra de simulaciones Monte Carlo ({max_sim_pdf} de {len(df_sim_pdf)})",
+        df_sim_pdf.head(max_sim_pdf),
+        "Por tamaño del archivo, el PDF incluye una muestra de simulaciones. El archivo Excel descargable contiene la tabla completa de simulaciones."
+    )
 
     doc.build(story)
     buffer.seek(0)
@@ -533,16 +759,65 @@ if ejecutar:
     st.subheader("📉 Distribución de pérdidas retenidas")
     explicar_bloque(
         "la distribución de pérdidas retenidas",
-        "El histograma muestra cómo se distribuyen las pérdidas que permanecen en la aseguradora después de aplicar pólizas y reaseguro. La cola derecha representa escenarios extremos."
+        "El histograma muestra cómo se distribuyen las pérdidas que permanecen en la aseguradora después de aplicar pólizas y reaseguro. "
+        "Un pico en cero suele indicar simulaciones sin evento o sin pérdida retenida. Un pico cerca de la retención puede aparecer por el reaseguro XoL."
     )
 
     fig = px.histogram(
         df_sim,
         x="perdida_retenida_aseguradora",
-        nbins=60,
+        nbins=80,
         title="Distribución de pérdidas retenidas por la aseguradora"
     )
+    fig.update_layout(
+        xaxis_title="Pérdida retenida por la aseguradora",
+        yaxis_title="Número de simulaciones",
+        bargap=0.03
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+    mostrar_diagnostico_histograma(df_sim)
+
+    st.subheader("📊 Distribución de pérdidas brutas")
+    explicar_bloque(
+        "la distribución de pérdidas brutas",
+        "Esta gráfica muestra las pérdidas antes de aplicar reaseguro. Sirve para comparar si los picos del histograma retenido vienen del modelo de eventos o del efecto de la retención XoL."
+    )
+
+    fig_bruta = px.histogram(
+        df_sim,
+        x="perdida_bruta",
+        nbins=80,
+        title="Distribución de pérdidas brutas antes de reaseguro"
+    )
+    fig_bruta.update_layout(
+        xaxis_title="Pérdida bruta",
+        yaxis_title="Número de simulaciones",
+        bargap=0.03
+    )
+    st.plotly_chart(fig_bruta, use_container_width=True)
+
+    df_sim_positivas = df_sim[df_sim["perdida_retenida_aseguradora"] > 0].copy()
+
+    if not df_sim_positivas.empty:
+        st.subheader("📈 Distribución de pérdidas retenidas positivas")
+        explicar_bloque(
+            "la distribución sin ceros",
+            "Esta vista elimina las simulaciones con pérdida retenida igual a cero para observar mejor la forma de la cola y los escenarios con siniestros."
+        )
+
+        fig_pos = px.histogram(
+            df_sim_positivas,
+            x="perdida_retenida_aseguradora",
+            nbins=80,
+            title="Distribución de pérdidas retenidas positivas"
+        )
+        fig_pos.update_layout(
+            xaxis_title="Pérdida retenida positiva",
+            yaxis_title="Número de simulaciones",
+            bargap=0.03
+        )
+        st.plotly_chart(fig_pos, use_container_width=True)
 
     st.subheader("📌 Pérdidas brutas vs retenidas")
     explicar_bloque(
